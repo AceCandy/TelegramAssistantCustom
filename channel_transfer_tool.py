@@ -103,7 +103,7 @@ async def main():
             return 1
 
         # 创建频道转发处理器
-        handler = ChannelTransferHandler(client)
+        handler = ChannelTransferHandler(client, config)
 
         # 解析日期字符串
         try:

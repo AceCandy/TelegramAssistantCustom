@@ -17,7 +17,7 @@ SHANGHAI_TIMEZONE = timezone(timedelta(hours=8))
 class ChannelTransferHandler:
     """处理频道消息转发的类"""
 
-    def __init__(self, client: TelegramClient):
+    def __init__(self, client: TelegramClient, config=None):
         """
         初始化频道转发处理器
 
@@ -34,7 +34,7 @@ class ChannelTransferHandler:
         )
         if not os.path.exists(self.temp_dir):
             os.makedirs(self.temp_dir)
-        self.hdhive_resolver = HDHiveResolver({})
+        self.hdhive_resolver = HDHiveResolver(config or {})
 
     async def get_entity(self, channel_id_or_username):
         """获取频道实体"""

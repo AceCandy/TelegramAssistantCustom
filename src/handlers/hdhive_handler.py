@@ -11,7 +11,6 @@ logger = logging.getLogger(__name__)
 # Cookie文件路径
 COOKIE_FILE_PATH = "/app/config/hdhive.json"
 
-
 class HDHiveResolver:
     """HDHive资源链接解析器"""
     
@@ -20,20 +19,12 @@ class HDHiveResolver:
         cfg = config.get("hdhive", {})
         
         # 配置参数
-        self.next_action_first = cfg.get(
-            "next_action_first", "7546a7ff75f6a6e4c58509eba862d1f1732abe3c"
-        )
-        self.next_action_second = cfg.get(
-            "next_action_second", "d251dc56628a88a6d5eabe338e5836ff5066b9d6"
-        )
-        self.next_action_unlock = cfg.get(
-            "next_action_unlock", "d8f08f74a0c64c16cf335e57b14ffc8ac091706a"
-        )
-        self.login_next_action = cfg.get(
-            "login_next_action", "b83314229c4b8a89b5e0e64859c9e8ac0b4fd5de"
-        )
-        self.username = cfg.get("username", "804649325@qq.com")
-        self.password = cfg.get("password", "AceCandy15123934")
+        self.next_action_first = cfg.get("next_action_first", "")
+        self.next_action_second = cfg.get("next_action_second", "")
+        self.next_action_unlock = cfg.get("next_action_unlock", "")
+        self.login_next_action = cfg.get("login_next_action", "")
+        self.username = cfg.get("username", "")
+        self.password = cfg.get("password", "")
         self.unlock_threshold = cfg.get("unlock_threshold", 20)
         self.user_agent = cfg.get(
             "user_agent",
