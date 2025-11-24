@@ -6,6 +6,7 @@ from telethon import TelegramClient
 from telethon.tl.functions.messages import GetHistoryRequest
 from telethon.tl.types import Channel, MessageEntityTextUrl
 from telethon.errors import FloodWaitError
+from .hdhive_handler import HDHiveResolver
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,7 @@ class ChannelTransferHandler:
         )
         if not os.path.exists(self.temp_dir):
             os.makedirs(self.temp_dir)
+        self.hdhive_resolver = HDHiveResolver({})
 
     async def get_entity(self, channel_id_or_username):
         """获取频道实体"""
@@ -277,3 +279,6 @@ class ChannelTransferHandler:
             # 等待指定的小时数
             logger.info(f"等待 {interval_hours} 小时后继续执行")
             await asyncio.sleep(interval_hours * 3600)
+            rewritten_text = await self.hdhive_resolver.rewrite_text(text)
+            if rewritten_text != text:
+                text = rewritten_text

@@ -48,6 +48,14 @@ def load_config():
             "enabled": False,
             "format": "mp3",
         },
+        "hdhive": {
+            "cookie": "",
+            "next_action_first": "7546a7ff75f6a6e4c58509eba862d1f1732abe3c",
+            "next_action_second": "d251dc56628a88a6d5eabe338e5836ff5066b9d6",
+            "next_action_unlock": "d8f08f74a0c64c16cf335e57b14ffc8ac091706a",
+            "unlock_threshold": 20,
+            "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36",
+        },
     }
 
     try:

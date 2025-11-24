@@ -6,6 +6,7 @@ from .telegram_handler import TelegramHandler
 from .youtube_handler import YouTubeHandler
 from .douyin_handler import CustomDouyinHandler
 from .bilibili_handler import BilibiliHandler
+from .hdhive_handler import HDHiveResolver
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,7 @@ class EventHandler:
         )
         if not os.path.exists(self.temp_dir):
             os.makedirs(self.temp_dir)
+        self.hdhive_resolver = HDHiveResolver(config)
 
     def is_chat_allowed(self, chat_id):
         """检查chat_id是否在允许列表中"""
@@ -153,6 +155,8 @@ class EventHandler:
                         # 检查是否需要根据关键词过滤
                         should_transfer = True
                         message_text = event.message.text if event.message.text else ""
+                        rewritten_text = await self.hdhive_resolver.rewrite_text(message_text)
+                        need_modify = rewritten_text != message_text
 
                         # 首先检查排除词（优先级最高）
                         if exclude_words:
@@ -184,7 +188,7 @@ class EventHandler:
                                     )
                                     continue
 
-                                if direct:
+                                if direct or need_modify:
                                     logger.info(f"直接转发消息: {event.message.text}")
                                     # 检查消息是否包含photo
                                     if event.message.photo:
@@ -200,11 +204,7 @@ class EventHandler:
                                         # 发送文本和照片
                                         await client.send_message(
                                             target_entity,
-                                            (
-                                                event.message.text
-                                                if event.message.text
-                                                else ""
-                                            ),
+                                            (rewritten_text if need_modify else (event.message.text if event.message.text else "")),
                                             file=temp_file_path,
                                         )
 
@@ -214,7 +214,7 @@ class EventHandler:
                                     else:
                                         # 没有照片，只发送文本
                                         await client.send_message(
-                                            target_entity, event.message.text
+                                            target_entity, (rewritten_text if need_modify else event.message.text)
                                         )
                                 else:
                                     # 转发消息
@@ -288,6 +288,8 @@ class EventHandler:
                 # 检查是否需要根据关键词过滤
                 should_transfer = True
                 message_text = event.message.text if event.message.text else ""
+                rewritten_text = await self.hdhive_resolver.rewrite_text(message_text)
+                need_modify = rewritten_text != message_text
 
                 # 首先检查排除词（优先级最高）
                 exclude_words = transfer.get("exclude_words", [])
@@ -318,18 +320,19 @@ class EventHandler:
                             continue
 
                         # 检查消息是否包含photo
-                        if event.message.photo:
+                        if need_modify or event.message.photo:
                             # 如果有照片，下载到临时文件再发送
                             temp_file_path = os.path.join(
                                 self.temp_dir, f"photo_{event.message.id}.jpg"
                             )
-                            await event.message.download_media(temp_file_path)
+                            if event.message.photo:
+                                await event.message.download_media(temp_file_path)
 
                             # 发送文本和照片
                             await event.client.send_message(
                                 target_entity,
-                                (event.message.text if event.message.text else ""),
-                                file=temp_file_path,
+                                (rewritten_text if need_modify else (event.message.text if event.message.text else "")),
+                                file=temp_file_path if event.message.photo else None,
                             )
 
                             # 删除临时文件
@@ -337,7 +340,7 @@ class EventHandler:
                                 os.remove(temp_file_path)
 
                             logger.info(
-                                f"已将图文消息从 {source_chat} 发送到 {target_chat}"
+                                f"已将消息从 {source_chat} 发送到 {target_chat}"
                             )
                         else:
                             # 转发消息
