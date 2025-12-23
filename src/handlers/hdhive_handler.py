@@ -3,6 +3,8 @@ import json
 import logging
 import httpx
 import os
+import time
+from urllib.parse import quote
 from typing import Optional, Dict, Any, List, Tuple
 from functools import lru_cache
 
@@ -147,6 +149,7 @@ class HDHiveResolver:
                 match = self._token_pattern.search(cookie)
                 if match:
                     new_token = match.group(1)
+                if new_token:
                     break
 
             if not new_token:
@@ -188,6 +191,98 @@ class HDHiveResolver:
         if self.cookie:
             headers["cookie"] = self.cookie
         return headers
+
+    def _build_api_headers(self) -> Dict[str, str]:
+        headers = {
+            "accept": "application/json, text/plain, */*",
+            "user-agent": self.user_agent,
+        }
+        self.cookie = self._load_cookie_from_file()
+        if self.cookie:
+            headers["cookie"] = self.cookie
+        return headers
+
+    def _build_action1_payload(self, resource_hash: str) -> str:
+        payload_obj = {"slug": resource_hash, "utctimestamp": int(time.time())}
+        return json.dumps([json.dumps(payload_obj, separators=(",", ":"))], separators=(",", ":"))
+
+    def _extract_indexed_value(self, text: str, index: int) -> Optional[Any]:
+        pattern = self._compile_regex(rf"(?:^|\n){index}:(.*?)(?=\n\d+:|$)")
+        match = pattern.search(text)
+        if not match:
+            return None
+        raw = match.group(1).strip()
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return raw.strip().strip('"')
+
+    async def _action1_get_query(self, client: httpx.AsyncClient, resource_url: str, resource_hash: str) -> Optional[str]:
+        payload = self._build_action1_payload(resource_hash)
+        for _ in range(2):
+            headers1 = self._build_headers(self.next_action_first)
+            response = await client.post(resource_url, headers=headers1, content=payload)
+            if response.status_code == 401 or "请先登录" in response.text or "登录已过期" in response.text:
+                if not await self._re_login(resource_hash):
+                    return None
+                continue
+            response.raise_for_status()
+            query = self._extract_indexed_value(response.text, 1)
+            return query if isinstance(query, str) and query else None
+        return None
+
+    async def _go_api_get_data_str(self, client: httpx.AsyncClient, resource_hash: str, query: str) -> Tuple[Optional[str], bool, int]:
+        url = f"https://hdhive.com/go-api/customer/resources/{resource_hash}/url?query={quote(query, safe='')}"
+        for _ in range(2):
+            headers = self._build_api_headers()
+            response = await client.get(url, headers=headers)
+            if response.status_code == 401:
+                if not await self._re_login(resource_hash):
+                    return None, False, 0
+                continue
+            response.raise_for_status()
+            try:
+                obj = response.json()
+            except Exception:
+                logger.error("go-api响应无法解析为JSON")
+                return None, False, 0
+
+            if isinstance(obj, dict):
+                code = obj.get("code")
+                msg = obj.get("message", "") or ""
+                if code == 401 or msg == "请先登录":
+                    if not await self._re_login(resource_hash):
+                        return None, False, 0
+                    continue
+                if code == "400404" and "需要使用" in msg and "积分解锁" in msg:
+                    match = self._pts_pattern.search(msg)
+                    pts = int(match.group(1)) if (match and match.group(1).isdigit()) else 0
+                    return None, True, pts
+                if obj.get("success") is True and obj.get("data"):
+                    return str(obj.get("data")), False, 0
+            return None, False, 0
+        return None, False, 0
+
+    async def _unlock_resource(self, client: httpx.AsyncClient, resource_url: str, resource_hash: str) -> bool:
+        headers = self._build_headers(self.next_action_unlock)
+        payload = self._build_action1_payload(resource_hash)
+        response = await client.post(resource_url, headers=headers, content=payload)
+        if response.status_code == 401 or "请先登录" in response.text or "登录已过期" in response.text:
+            if not await self._re_login(resource_hash):
+                return False
+            headers = self._build_headers(self.next_action_unlock)
+            response = await client.post(resource_url, headers=headers, content=payload)
+        try:
+            response.raise_for_status()
+        except httpx.HTTPError:
+            return False
+        obj = self._find_json_object(response.text, "success") or self._find_json_object(response.text, "response")
+        if isinstance(obj, dict):
+            if obj.get("success") is True:
+                return True
+            if isinstance(obj.get("response"), dict) and obj.get("response", {}).get("success") is True:
+                return True
+        return "success" in response.text and "true" in response.text.lower()
 
     async def _handle_action1_response(self, client: httpx.AsyncClient, url: str, 
                                      headers1: Dict[str, str], h: str, 
@@ -338,18 +433,27 @@ class HDHiveResolver:
         
         try:
             async with httpx.AsyncClient(timeout=20) as client:
-                headers1 = self._build_headers(self.next_action_first)
-                
-                # 第一次执行action1
-                obj1, r1_text = await self._do_first_action(client, url, headers1, h)
-                
-                # 处理action1响应
-                data_str = await self._handle_action1_response(client, url, headers1, h, obj1, r1_text)
-                if not data_str:
-                    return None
-                
-                # 执行action2获取最终URL
-                return await self._get_final_url(client, url, data_str)
+                max_attempts = 3
+                for _ in range(max_attempts):
+                    query = await self._action1_get_query(client, url, h)
+                    if not query:
+                        return None
+
+                    data_str, requires_unlock, pts = await self._go_api_get_data_str(client, h, query)
+                    if requires_unlock:
+                        if pts >= self.unlock_threshold:
+                            logger.error(f"解锁所需积分{pts}≥阈值{self.unlock_threshold}，无法解锁")
+                            return None
+                        if not await self._unlock_resource(client, url, h):
+                            return None
+                        self.pts = pts
+                        continue
+
+                    if not data_str:
+                        return None
+
+                    return await self._get_final_url(client, url, data_str)
+                return None
 
         except Exception as e:
             logger.error(f"HDHive解析失败: {str(e)}", exc_info=True)
