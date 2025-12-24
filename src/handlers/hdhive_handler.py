@@ -202,6 +202,17 @@ class HDHiveResolver:
             headers["cookie"] = self.cookie
         return headers
 
+    def _build_api_json_headers(self) -> Dict[str, str]:
+        headers = {
+            "accept": "application/json, text/plain, */*",
+            "content-type": "application/json",
+            "user-agent": self.user_agent,
+        }
+        self.cookie = self._load_cookie_from_file()
+        if self.cookie:
+            headers["cookie"] = self.cookie
+        return headers
+
     def _build_action1_payload(self, resource_hash: str) -> str:
         payload_obj = {"slug": resource_hash, "utctimestamp": int(time.time())}
         return json.dumps([json.dumps(payload_obj, separators=(",", ":"))], separators=(",", ":"))
@@ -240,7 +251,8 @@ class HDHiveResolver:
                 if not await self._re_login(resource_hash):
                     return None, False, 0
                 continue
-            response.raise_for_status()
+            if response.status_code not in (200, 400):
+                response.raise_for_status()
             try:
                 obj = response.json()
             except Exception:
@@ -263,26 +275,35 @@ class HDHiveResolver:
             return None, False, 0
         return None, False, 0
 
-    async def _unlock_resource(self, client: httpx.AsyncClient, resource_url: str, resource_hash: str) -> bool:
-        headers = self._build_headers(self.next_action_unlock)
-        payload = self._build_action1_payload(resource_hash)
-        response = await client.post(resource_url, headers=headers, content=payload)
-        if response.status_code == 401 or "请先登录" in response.text or "登录已过期" in response.text:
-            if not await self._re_login(resource_hash):
-                return False
-            headers = self._build_headers(self.next_action_unlock)
-            response = await client.post(resource_url, headers=headers, content=payload)
-        try:
-            response.raise_for_status()
-        except httpx.HTTPError:
-            return False
-        obj = self._find_json_object(response.text, "success") or self._find_json_object(response.text, "response")
-        if isinstance(obj, dict):
-            if obj.get("success") is True:
-                return True
-            if isinstance(obj.get("response"), dict) and obj.get("response", {}).get("success") is True:
-                return True
-        return "success" in response.text and "true" in response.text.lower()
+    async def _go_api_unlock(self, client: httpx.AsyncClient, resource_hash: str, query: str) -> Optional[str]:
+        url = f"https://hdhive.com/go-api/customer/resources/{resource_hash}/unlock"
+        payload = {"data": query}
+        for _ in range(2):
+            headers = self._build_api_json_headers()
+            response = await client.post(url, headers=headers, json=payload)
+            if response.status_code == 401:
+                if not await self._re_login(resource_hash):
+                    return None
+                continue
+            if response.status_code not in (200, 400):
+                response.raise_for_status()
+            try:
+                obj = response.json()
+            except Exception:
+                logger.error("go-api unlock响应无法解析为JSON")
+                return None
+
+            if isinstance(obj, dict):
+                code = obj.get("code")
+                msg = obj.get("message", "") or ""
+                if code == 401 or msg == "请先登录":
+                    if not await self._re_login(resource_hash):
+                        return None
+                    continue
+                if obj.get("success") is True and obj.get("data"):
+                    return str(obj.get("data"))
+            return None
+        return None
 
     async def _handle_action1_response(self, client: httpx.AsyncClient, url: str, 
                                      headers1: Dict[str, str], h: str, 
@@ -444,10 +465,11 @@ class HDHiveResolver:
                         if pts >= self.unlock_threshold:
                             logger.error(f"解锁所需积分{pts}≥阈值{self.unlock_threshold}，无法解锁")
                             return None
-                        if not await self._unlock_resource(client, url, h):
-                            return None
                         self.pts = pts
-                        continue
+                        unlock_data = await self._go_api_unlock(client, h, query)
+                        if not unlock_data:
+                            return None
+                        return await self._get_final_url(client, url, unlock_data)
 
                     if not data_str:
                         return None
