@@ -35,6 +35,7 @@ class HDHiveResolver:
         
         # 状态变量
         self.pts = 0
+        self.unlock_failed = False
         
         # 编译正则表达式（性能优化）
         self._resource_pattern = re.compile(r"https?://hdhive\.com/resource/(?:(\d+)/)?([0-9a-f]{32})")
@@ -289,13 +290,37 @@ class HDHiveResolver:
         step_display = self.STEP_MAP.get(step, step)
         io_display = self.IO_MAP.get(io, io)
         
+        # 构建单行日志信息
+        log_parts = [f"[{step_display}]"]
+        
+        if payload:
+            # 提取关键信息
+            url = payload.get("resource_url") or payload.get("url")
+            if url:
+                log_parts.append(f"url:{url}")
+                
+            # 提取参数（排除url）
+            params = {k: v for k, v in payload.items() if k not in ("resource_url", "url", "status", "error", "query", "data_str", "final_url")}
+            if params:
+                log_parts.append(f"参数:{json.dumps(params, ensure_ascii=False)}")
+                
+            # 提取出参/结果
+            results = {}
+            for k in ("status", "error", "query", "data_str", "final_url", "pts", "requires_unlock"):
+                if k in payload:
+                    results[k] = payload[k]
+            if results:
+                log_parts.append(f"出参:{json.dumps(results, ensure_ascii=False)}")
+        
+        msg = " ".join(log_parts)
+        
         event_payload: Dict[str, Any] = {
             "event": "hdhive_step",
             "step": step,
             "step_display": step_display,
             "io": io,
             "io_display": io_display,
-            "msg": f"[{step_display}] {io_display}",
+            "msg": msg,
         }
         if payload:
             event_payload.update(payload)
@@ -607,6 +632,8 @@ class HDHiveResolver:
     async def resolve_url(self, url: str) -> Optional[str]:
         """解析HDHive链接"""
         self._log_step("resolve_url", "input", {"url": url})
+        self.pts = 0
+        self.unlock_failed = False
         h = self._extract_hash(url)
         if not h:
             self._log_step("resolve_url", "output", {"status": "invalid_url", "url": url})
@@ -625,6 +652,7 @@ class HDHiveResolver:
 
                     data_str, requires_unlock, pts = await self._go_api_get_data_str(client, url, h, query)
                     if requires_unlock:
+                        self.pts = pts
                         if pts >= self.unlock_threshold:
                             self._log_step(
                                 "resolve_url",
@@ -632,15 +660,18 @@ class HDHiveResolver:
                                 {"status": "unlock_blocked", "pts": pts, "unlock_threshold": self.unlock_threshold},
                             )
                             logger.error(f"解锁所需积分{pts}≥阈值{self.unlock_threshold}，无法解锁")
+                            self.unlock_failed = True
                             return None
-                        self.pts = pts
                         unlock_data = await self._go_api_unlock(client, url, h, query)
                         if not unlock_data:
                             self._log_step("resolve_url", "output", {"status": "unlock_failed", "pts": pts})
+                            self.unlock_failed = True
                             return None
-                        final_url = await self._get_final_url(client, url, unlock_data)
-                        self._log_step("resolve_url", "output", {"status": "ok", "final_url": self._preview_text(final_url, 300) if final_url else None})
-                        return final_url
+                        
+                        # 解锁成功后，需要重新走一遍流程获取最新的query和data_str
+                        # 因为解锁后，服务器状态变了，原来的query可能失效或需要更新
+                        logger.info(f"解锁成功，重新获取资源数据...")
+                        continue
 
                     if not data_str:
                         self._log_step("resolve_url", "output", {"status": "go_api_no_data"})
@@ -678,9 +709,17 @@ class HDHiveResolver:
                 replaced = replaced.replace(full_url, new_url)
         
         # 替换文本中的"直达链接"为积分信息
-        pts_text = str(self.pts) if self.pts else "0"
-        replaced = replaced.replace("直达链接", f"{pts_text}积分解锁")
-        self._log_step("rewrite_text", "output", {"status": "ok", "matches": len(matches), "pts": self.pts})
+        if self.unlock_failed and self.pts:
+            replaced = replaced.replace("直达链接", f"解锁失败，需要{self.pts}积分")
+        else:
+            pts_text = str(self.pts) if self.pts else "0"
+            replaced = replaced.replace("直达链接", f"{pts_text}积分解锁")
+        self._log_step(
+            "rewrite_text",
+            "output",
+            {"status": "ok", "matches": len(matches), "pts": self.pts, "unlock_failed": self.unlock_failed},
+        )
         self.pts = 0
+        self.unlock_failed = False
         
         return replaced
