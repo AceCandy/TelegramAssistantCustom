@@ -13,3 +13,4 @@ extract_emails.py
 get_bot_messages.py
 quick_extract_emails.py
 quick_get_bot_messages.py
+.claude/
