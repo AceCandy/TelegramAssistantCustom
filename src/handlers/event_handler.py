@@ -38,6 +38,27 @@ class EventHandler:
             os.makedirs(self.temp_dir)
         self.hdhive_resolver = HDHiveResolver(config)
 
+    @staticmethod
+    def _append_button_text(message_text: str, message) -> str:
+        if not getattr(message, "reply_markup", None):
+            return message_text
+
+        lines = []
+        for row in message.reply_markup.rows:
+            for button in row.buttons:
+                text = getattr(button, "text", None)
+                url = getattr(button, "url", None)
+                if text:
+                    lines.append(text)
+                if url:
+                    lines.append(url)
+
+        if not lines:
+            return message_text
+
+        separator = "\n" if message_text else ""
+        return f"{message_text}{separator}{'\n'.join(lines)}"
+
     def is_chat_allowed(self, chat_id):
         """检查chat_id是否在允许列表中"""
         # 如果allowed_chat_ids为空列表，则允许所有
@@ -155,6 +176,9 @@ class EventHandler:
                         # 检查是否需要根据关键词过滤
                         should_transfer = True
                         message_text = event.message.text if event.message.text else ""
+                        message_text = self._append_button_text(
+                            message_text, event.message
+                        )
                         ignore_links = transfer.get("forwardIgnoreLink", [])
                         rewritten_text = await self.hdhive_resolver.rewrite_text(
                             message_text,
@@ -292,6 +316,9 @@ class EventHandler:
                 # 检查是否需要根据关键词过滤
                 should_transfer = True
                 message_text = event.message.text if event.message.text else ""
+                message_text = self._append_button_text(
+                    message_text, event.message
+                )
                 ignore_links = transfer.get("forwardIgnoreLink", [])
                 rewritten_text = await self.hdhive_resolver.rewrite_text(
                     message_text,
