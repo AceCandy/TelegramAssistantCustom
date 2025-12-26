@@ -693,6 +693,9 @@ class HDHiveResolver:
         if not text:
             self._log_step("rewrite_text", "output", {"status": "empty"})
             return text
+        if "hdhive.com" not in text:
+            self._log_step("rewrite_text", "output", {"status": "skip_no_domain"})
+            return text
         
         matches = list(self._resource_pattern.finditer(text))
         if not matches:
