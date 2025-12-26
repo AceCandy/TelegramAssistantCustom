@@ -155,7 +155,11 @@ class EventHandler:
                         # 检查是否需要根据关键词过滤
                         should_transfer = True
                         message_text = event.message.text if event.message.text else ""
-                        rewritten_text = await self.hdhive_resolver.rewrite_text(message_text)
+                        ignore_links = transfer.get("forwardIgnoreLink", [])
+                        rewritten_text = await self.hdhive_resolver.rewrite_text(
+                            message_text,
+                            ignore_domains=ignore_links,
+                        )
                         need_modify = rewritten_text != message_text
 
                         # 首先检查排除词（优先级最高）
@@ -288,7 +292,11 @@ class EventHandler:
                 # 检查是否需要根据关键词过滤
                 should_transfer = True
                 message_text = event.message.text if event.message.text else ""
-                rewritten_text = await self.hdhive_resolver.rewrite_text(message_text)
+                ignore_links = transfer.get("forwardIgnoreLink", [])
+                rewritten_text = await self.hdhive_resolver.rewrite_text(
+                    message_text,
+                    ignore_domains=ignore_links,
+                )
                 need_modify = rewritten_text != message_text
 
                 # 首先检查排除词（优先级最高）

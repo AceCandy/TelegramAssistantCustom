@@ -161,6 +161,7 @@ transfer_message:
     target_chat: "" # 目标接收者（可以是用户名、ID或群组/频道ID）
     include_keywords: [] # 关键词列表，留空表示转发所有消息
     exclude_words: [] # 排除词列表，包含这些词的消息不会被转发（优先级高于include_keywords）
+    forwardIgnoreLink: [] # 转发时忽略的链接域名（如 t.me）
 
   - source_chat: "" # 源频道/群组ID或用户名
     target_chat: "" # 目标接收者
@@ -170,6 +171,9 @@ transfer_message:
     exclude_words: # 排除包含这些词的消息（优先级最高）
       - "广告"
       - "推广"
+    forwardIgnoreLink: # 转发时忽略的链接域名
+      - "t.me"
+      - "content.21cn.com"
 
 # 注意：消息转发功能需要启用用户账号（user_account.enabled=true）
 # 关键词过滤逻辑：
@@ -233,6 +237,7 @@ proxy:
    - `include_keywords`：包含词列表，只有包含这些词的消息才会转发
    - `exclude_words`：排除词列表，包含这些词的消息不会被转发（优先级最高）
    - `direct`：是否直接发送消息内容而不是转发原消息
+   - `forwardIgnoreLink`：转发时忽略的链接域名（匹配 http/https 开头）
    - 过滤逻辑：先检查排除词，再检查包含词
 
 6. **代理设置**：

@@ -6,7 +6,7 @@ import os
 import time
 import uuid
 from urllib.parse import quote
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any, Tuple, List
 from functools import lru_cache
 
 logger = logging.getLogger(__name__)
@@ -687,20 +687,71 @@ class HDHiveResolver:
             logger.error(f"HDHive解析失败: {str(e)}", exc_info=True)
             return None
 
-    async def rewrite_text(self, text: Optional[str]) -> Optional[str]:
+    def _remove_ignored_links(self, text: str, ignore_domains: List[str]) -> Tuple[str, int]:
+        if not ignore_domains:
+            return text, 0
+
+        def should_ignore(url: str) -> bool:
+            for domain in ignore_domains:
+                if url.startswith(f"http://{domain}") or url.startswith(f"https://{domain}"):
+                    return True
+            return False
+
+        ignored_count = 0
+
+        def repl(match: re.Match) -> str:
+            nonlocal ignored_count
+            url = match.group(0)
+            if should_ignore(url):
+                ignored_count += 1
+                return ""
+            return url
+
+        return self._url_pattern.sub(repl, text), ignored_count
+
+    async def rewrite_text(self, text: Optional[str], ignore_domains: Optional[List[str]] = None) -> Optional[str]:
         """重写文本中的HDHive链接"""
         self._log_step("rewrite_text", "input", {"text_length": len(text) if text else 0})
         if not text:
             self._log_step("rewrite_text", "output", {"status": "empty"})
             return text
+
+        if ignore_domains is None:
+            ignore_domains = []
+        elif isinstance(ignore_domains, str):
+            ignore_domains = [ignore_domains]
+        ignore_domains = [
+            domain.strip().removeprefix("http://").removeprefix("https://").rstrip("/")
+            for domain in ignore_domains
+            if isinstance(domain, str) and domain.strip()
+        ]
+
         if "hdhive.com" not in text:
             self._log_step("rewrite_text", "output", {"status": "skip_no_domain"})
+            if ignore_domains:
+                replaced, ignored_count = self._remove_ignored_links(text, ignore_domains)
+                if ignored_count:
+                    self._log_step(
+                        "rewrite_text",
+                        "output",
+                        {"status": "ignored_links", "ignored_count": ignored_count, "ignore_domains": ignore_domains},
+                    )
+                return replaced
             return text
         
         matches = list(self._resource_pattern.finditer(text))
         if not matches:
             self._log_step("rewrite_text", "output", {"status": "no_match"})
-            return text.replace("直达链接", "解锁失败")
+            replaced = text.replace("直达链接", "解锁失败")
+            if ignore_domains:
+                replaced, ignored_count = self._remove_ignored_links(replaced, ignore_domains)
+                if ignored_count:
+                    self._log_step(
+                        "rewrite_text",
+                        "output",
+                        {"status": "ignored_links", "ignored_count": ignored_count, "ignore_domains": ignore_domains},
+                    )
+            return replaced
         
         replaced = text
         for m in matches:
@@ -717,6 +768,14 @@ class HDHiveResolver:
         else:
             pts_text = str(self.pts) if self.pts else "0"
             replaced = replaced.replace("直达链接", f"{pts_text}积分解锁")
+        if ignore_domains:
+            replaced, ignored_count = self._remove_ignored_links(replaced, ignore_domains)
+            if ignored_count:
+                self._log_step(
+                    "rewrite_text",
+                    "output",
+                    {"status": "ignored_links", "ignored_count": ignored_count, "ignore_domains": ignore_domains},
+                )
         self._log_step(
             "rewrite_text",
             "output",
