@@ -2,12 +2,14 @@ import os
 import logging
 import asyncio
 import signal
+from logging.handlers import TimedRotatingFileHandler
 from src.config.config_loader import load_config
 from src.services.client_service import ClientService
 from src.services.scheduler_service import SchedulerService
 from src.handlers.event_handler import EventHandler
 from src.utils.file_utils import ensure_dirs
 from src.constants import (
+    CONFIG_DIR,
     TELEGRAM_TEMP_DIR,
     YOUTUBE_TEMP_DIR,
     TELEGRAM_VIDEOS_DIR,
@@ -17,16 +19,35 @@ from src.constants import (
     YOUTUBE_DEST_DIR,
 )
 
-# 配置日志
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
-)
 logger = logging.getLogger(__name__)
+
+
+def configure_logging(log_level: str = "INFO") -> None:
+    log_dir = os.path.join(CONFIG_DIR, "log")
+    os.makedirs(log_dir, exist_ok=True)
+    log_file = os.path.join(log_dir, "app.log")
+
+    formatter = logging.Formatter(
+        "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    )
+    file_handler = TimedRotatingFileHandler(
+        log_file, when="midnight", interval=1, backupCount=30, encoding="utf-8"
+    )
+    file_handler.setFormatter(formatter)
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(formatter)
+
+    root = logging.getLogger()
+    root.handlers.clear()
+    root.setLevel(log_level)
+    root.addHandler(file_handler)
+    root.addHandler(console_handler)
 
 
 async def main():
     """主程序入口"""
     try:
+        configure_logging("INFO")
         # 加载配置
         config = load_config()
 

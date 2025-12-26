@@ -1,17 +1,36 @@
 import os
 import yaml
 import logging
+from logging.handlers import TimedRotatingFileHandler
 from telethon import TelegramClient
 
-# 配置日志
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
-)
 logger = logging.getLogger(__name__)
 
 # 获取程序所在目录的绝对路径
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_DIR = os.path.join(BASE_DIR, "config")
+
+
+def configure_logging(log_level: str = "INFO") -> None:
+    log_dir = os.path.join(CONFIG_DIR, "log")
+    os.makedirs(log_dir, exist_ok=True)
+    log_file = os.path.join(log_dir, "app.log")
+
+    formatter = logging.Formatter(
+        "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    )
+    file_handler = TimedRotatingFileHandler(
+        log_file, when="midnight", interval=1, backupCount=30, encoding="utf-8"
+    )
+    file_handler.setFormatter(formatter)
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(formatter)
+
+    root = logging.getLogger()
+    root.handlers.clear()
+    root.setLevel(log_level)
+    root.addHandler(file_handler)
+    root.addHandler(console_handler)
 
 
 def load_config():
@@ -41,6 +60,7 @@ def load_config():
 async def generate_session():
     """生成用户session文件"""
     try:
+        configure_logging("INFO")
         # 加载配置
         config = load_config()
 
