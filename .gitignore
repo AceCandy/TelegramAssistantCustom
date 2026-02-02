@@ -16,5 +16,3 @@ quick_get_bot_messages.py
 .claude/
 .claude/sessions
 .agent/
-llmdoc/
-build.sh
