@@ -8,6 +8,11 @@ COPY main.py .
 COPY init.py .
 COPY entrypoint.sh .
 COPY src/ src/
+COPY web/ web/
+COPY requirements.txt .
+
+# 安装依赖
+RUN pip install --no-cache-dir -r requirements.txt
 
 # 创建必要的目录
 RUN mkdir -p \
@@ -25,6 +30,9 @@ RUN chmod +x entrypoint.sh
 
 # 设置环境变量
 ENV PYTHONUNBUFFERED=1
+
+# 暴露Web端口
+EXPOSE 12321
 
 # 使用启动脚本
 ENTRYPOINT ["./entrypoint.sh"] 

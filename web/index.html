@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TelegramAssistant 配置管理</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🤖 TelegramAssistant 配置管理</h1>
+            <div class="header-actions">
+                <button id="reloadBtn" class="btn btn-secondary" onclick="loadConfig()">🔄 重新加载</button>
+                <button id="saveBtn" class="btn btn-primary" onclick="saveConfig()">💾 保存配置</button>
+            </div>
+        </header>
+
+        <div id="toast" class="toast"></div>
+
+        <main>
+            <!-- API Credentials -->
+            <section class="card">
+                <h2>🔑 API 凭证</h2>
+                <div class="form-grid">
+                    <div class="form-group">
+                        <label for="api_id">API ID</label>
+                        <input type="text" id="api_id" placeholder="从 my.telegram.org 获取">
+                    </div>
+                    <div class="form-group">
+                        <label for="api_hash">API Hash</label>
+                        <input type="text" id="api_hash" placeholder="从 my.telegram.org 获取">
+                    </div>
+                </div>
+            </section>
+
+            <!-- Bot Account -->
+            <section class="card">
+                <h2>🤖 Bot 账号</h2>
+                <div class="form-grid">
+                    <div class="form-group">
+                        <label for="bot_token">Bot Token</label>
+                        <input type="text" id="bot_token" placeholder="从 @BotFather 获取">
+                    </div>
+                    <div class="form-group">
+                        <label for="bot_session_name">Session 名称</label>
+                        <input type="text" id="bot_session_name" value="bot_session">
+                    </div>
+                </div>
+            </section>
+
+            <!-- User Account -->
+            <section class="card">
+                <h2>👤 用户账号 <span class="badge">可选</span></h2>
+                <div class="form-group switch-group">
+                    <label class="switch">
+                        <input type="checkbox" id="user_enabled">
+                        <span class="slider"></span>
+                    </label>
+                    <span>启用用户账号</span>
+                </div>
+                <div class="form-grid" id="userAccountFields">
+                    <div class="form-group">
+                        <label for="user_phone">手机号</label>
+                        <input type="text" id="user_phone" placeholder="+86xxxxxxxxx">
+                    </div>
+                    <div class="form-group">
+                        <label for="user_session_name">Session 名称</label>
+                        <input type="text" id="user_session_name" value="user_session">
+                    </div>
+                </div>
+            </section>
+
+            <!-- YouTube Download -->
+            <section class="card">
+                <h2>📺 YouTube 下载设置</h2>
+                <div class="form-grid">
+                    <div class="form-group">
+                        <label for="youtube_format">视频格式</label>
+                        <input type="text" id="youtube_format" value="bv*+ba/best" placeholder="yt-dlp 格式">
+                    </div>
+                    <div class="form-group">
+                        <label for="youtube_cookies">Cookies</label>
+                        <input type="text" id="youtube_cookies" placeholder="用于下载会员内容">
+                    </div>
+                </div>
+                <div class="form-group switch-group">
+                    <label class="switch">
+                        <input type="checkbox" id="youtube_download_list">
+                        <span class="slider"></span>
+                    </label>
+                    <span>下载播放列表</span>
+                </div>
+            </section>
+
+            <!-- Bilibili & Douyin -->
+            <section class="card">
+                <h2>🎬 其他平台设置</h2>
+                <div class="form-grid">
+                    <div class="form-group">
+                        <label for="bilibili_cookie">Bilibili Cookie</label>
+                        <input type="text" id="bilibili_cookie" placeholder="B站 Cookie">
+                    </div>
+                    <div class="form-group">
+                        <label for="douyin_cookie">抖音 Cookie</label>
+                        <input type="text" id="douyin_cookie" placeholder="抖音 Cookie">
+                    </div>
+                </div>
+            </section>
+
+            <!-- Permission Control -->
+            <section class="card">
+                <h2>🔒 权限控制</h2>
+                <div class="form-group">
+                    <label for="allowed_chat_ids">允许的 Chat ID（每行一个，留空允许所有）</label>
+                    <textarea id="allowed_chat_ids" rows="3" placeholder="123456789&#10;987654321"></textarea>
+                </div>
+            </section>
+
+            <!-- Proxy Settings -->
+            <section class="card">
+                <h2>🌐 代理设置</h2>
+                <div class="form-group switch-group">
+                    <label class="switch">
+                        <input type="checkbox" id="proxy_enabled">
+                        <span class="slider"></span>
+                    </label>
+                    <span>启用代理（仅支持 SOCKS5）</span>
+                </div>
+                <div class="form-grid" id="proxyFields">
+                    <div class="form-group">
+                        <label for="proxy_host">主机地址</label>
+                        <input type="text" id="proxy_host" value="127.0.0.1">
+                    </div>
+                    <div class="form-group">
+                        <label for="proxy_port">端口</label>
+                        <input type="number" id="proxy_port" value="7890" min="1" max="65535">
+                    </div>
+                </div>
+            </section>
+
+            <!-- Scheduled Messages -->
+            <section class="card">
+                <h2>⏰ 定时消息</h2>
+                <div id="scheduledMessages"></div>
+                <button class="btn btn-add" onclick="addScheduledMessage()">+ 添加定时消息</button>
+            </section>
+
+            <!-- Message Transfer -->
+            <section class="card">
+                <h2>📨 消息转发</h2>
+                <p class="hint">需要启用用户账号才能使用此功能</p>
+                <div id="transferMessages"></div>
+                <button class="btn btn-add" onclick="addTransferMessage()">+ 添加转发规则</button>
+            </section>
+
+            <!-- Log Level -->
+            <section class="card">
+                <h2>📋 日志设置</h2>
+                <div class="form-group">
+                    <label for="log_level">日志级别</label>
+                    <select id="log_level">
+                        <option value="DEBUG">DEBUG</option>
+                        <option value="INFO" selected>INFO</option>
+                        <option value="WARNING">WARNING</option>
+                        <option value="ERROR">ERROR</option>
+                    </select>
+                </div>
+            </section>
+
+            <!-- HDHive Advanced -->
+            <section class="card collapsible">
+                <h2 onclick="toggleCollapse(this)">🔧 HDHive 高级设置 <span class="collapse-icon">▼</span></h2>
+                <div class="collapse-content">
+                    <div class="form-grid">
+                        <div class="form-group">
+                            <label for="hdhive_username">用户名</label>
+                            <input type="text" id="hdhive_username">
+                        </div>
+                        <div class="form-group">
+                            <label for="hdhive_password">密码</label>
+                            <input type="password" id="hdhive_password">
+                        </div>
+                        <div class="form-group">
+                            <label for="hdhive_unlock_threshold">解锁阈值</label>
+                            <input type="number" id="hdhive_unlock_threshold" value="20">
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </main>
+
+        <footer>
+            <p>TelegramAssistant Config Manager v1.0</p>
+        </footer>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>

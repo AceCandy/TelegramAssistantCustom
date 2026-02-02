@@ -7,6 +7,8 @@ services:
       - ./downloads/telegram:/app/downloads/telegram
       - ./downloads/youtube:/app/downloads/youtube
       - ./downloads/temp:/app/temp
+    ports:
+      - "12321:12321"
 
     restart: unless-stopped
     container_name: telegram_assistant
