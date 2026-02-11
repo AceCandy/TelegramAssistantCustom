@@ -74,12 +74,26 @@ Temp → `temp/bilibili/`, Final → `downloads/bilibili/`
 
 **File**: `src/handlers/hdhive_handler.py`
 
-Complex handler for HDHive link resolution. Features:
-- Login handling
-- Credit unlock system
-- Multi-step resolution flow
+HDHive resolver now follows direct-page-first + server-action flow:
+- Supports `hdhive.com` and `hdhive.online` links.
+- Opens resource page directly first, then tries direct `115`/`115cdn` link extraction.
+- If login is required, triggers `_re_login()` via server-action login and persists merged cookies.
+- If direct extraction fails, uses `_action1_get_query()` to encrypt query payload, then calls go-api URL endpoint.
+- Decrypts returned payload with `_server_action_decrypt()` and assembles final 115 link (including password/access code when needed).
+- If unlock is required, compares points with `unlock_threshold`; only unlocks when below threshold, then retries resource fetch.
 
-Largest handler (~33KB), handles custom web scraping logic.
+Key methods for this flow:
+- `resolve_url()`
+- `_re_login()`
+- `_action1_get_query()`
+- `_go_api_get_data_str()`
+- `_go_api_unlock()`
+- `_server_action_decrypt()`
+
+Cookie behavior:
+- Loads cookie from disk before requests.
+- Merges new `Set-Cookie` values into existing cookie set.
+- Saves updated cookie after login and subsequent responses for session reuse.
 
 ---
 

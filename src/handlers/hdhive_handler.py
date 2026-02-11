@@ -5,14 +5,21 @@ import httpx
 import os
 import time
 import uuid
-from urllib.parse import quote
+from urllib.parse import quote, urljoin, urlparse
+from html import unescape
 from typing import Optional, Dict, Any, Tuple, List
 from functools import lru_cache
+from http.cookies import SimpleCookie
 
 logger = logging.getLogger(__name__)
 
 # Cookie文件路径
 COOKIE_FILE_PATH = "/app/config/hdhive.json"
+
+# HDHive Next.js Server Action IDs（2026-02）
+DEFAULT_SERVER_ACTION_LOGIN = "605db6f9f9097005c3efa316327b49963e8872c8c6"
+DEFAULT_SERVER_ACTION_ENCRYPT = "40f37785abc6ff4ada97734df369877f373d8b1002"
+DEFAULT_SERVER_ACTION_DECRYPT = "40a9013be8da6c1b4846eb2bbca43f1339a4fb4f4b"
 
 class HDHiveResolver:
     """HDHive资源链接解析器"""
@@ -25,6 +32,18 @@ class HDHiveResolver:
         self.next_action_first = cfg.get("next_action_first", "")
         self.next_action_second = cfg.get("next_action_second", "")
         self.login_next_action = cfg.get("login_next_action", "")
+        self.server_action_login = cfg.get(
+            "server_action_login",
+            self.login_next_action or DEFAULT_SERVER_ACTION_LOGIN,
+        )
+        self.server_action_encrypt = cfg.get(
+            "server_action_encrypt",
+            self.next_action_first or DEFAULT_SERVER_ACTION_ENCRYPT,
+        )
+        self.server_action_decrypt = cfg.get(
+            "server_action_decrypt",
+            self.next_action_second or DEFAULT_SERVER_ACTION_DECRYPT,
+        )
         self.username = cfg.get("username", "")
         self.password = cfg.get("password", "")
         self.unlock_threshold = cfg.get("unlock_threshold", 20)
@@ -32,13 +51,19 @@ class HDHiveResolver:
             "user_agent",
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36",
         )
+        self.cookie_file_path = cfg.get("cookie_file_path", COOKIE_FILE_PATH)
         
         # 状态变量
         self.pts = 0
         self.unlock_failed = False
         
         # 编译正则表达式（性能优化）
-        self._resource_pattern = re.compile(r"https?://hdhive\.com/resource/(?:(\d+)/)?([0-9a-f]{32})")
+        self._resource_pattern = re.compile(
+            r"https?://(?:www\.)?hdhive\.(?:com|online)/resource/(?:(\d+)/)?([0-9a-fA-F]{32})"
+        )
+        self._hdhive_url_pattern = re.compile(
+            r"https?://(?:www\.)?hdhive\.(?:com|online)/[^\s\]\[\)\(<>\"']+"
+        )
         self._token_pattern = re.compile(r"token=([^;]+)")
         self._pts_pattern = re.compile(r"需要使用\s*(\d+)\s*积分")
         self._url_pattern = re.compile(r"https?://\S+")
@@ -50,6 +75,9 @@ class HDHiveResolver:
     STEP_MAP = {
         "resolve_url": "🔗 解析链接",
         "_re_login": "🔐 自动登录",
+        "_server_action_encrypt": "🔐 加密参数",
+        "_server_action_decrypt": "🔓 解密数据",
+        "_resolve_direct_page": "🌐 直访资源页",
         "_action1_get_query": "🔍 获取查询参数",
         "_go_api_get_data_str": "📡 获取数据",
         "_go_api_unlock": "🔓 解锁资源",
@@ -62,18 +90,40 @@ class HDHiveResolver:
         "output": "📤 输出",
     }
 
+    def _create_client(self) -> httpx.AsyncClient:
+        return httpx.AsyncClient(timeout=20)
+
     def _load_cookie_from_file(self) -> str:
         """从文件加载cookie"""
         try:
             # 创建目录（如果不存在）
-            os.makedirs(os.path.dirname(COOKIE_FILE_PATH), exist_ok=True)
+            os.makedirs(os.path.dirname(self.cookie_file_path), exist_ok=True)
             
-            if os.path.exists(COOKIE_FILE_PATH):
-                with open(COOKIE_FILE_PATH, 'r', encoding='utf-8') as f:
-                    cookie = f.read().strip()
-                    if cookie:
-                        logger.debug("从文件加载cookie成功")
-                        return cookie
+            if os.path.exists(self.cookie_file_path):
+                with open(self.cookie_file_path, 'r', encoding='utf-8') as f:
+                    cookie_content = f.read().strip()
+                    if not cookie_content:
+                        return ""
+
+                    if cookie_content.startswith("{"):
+                        try:
+                            obj = json.loads(cookie_content)
+                            if isinstance(obj, dict):
+                                cookie_dict = obj.get("cookies")
+                                if isinstance(cookie_dict, dict):
+                                    cookie = self._cookie_dict_to_header(cookie_dict)
+                                    if cookie:
+                                        logger.debug("从文件加载cookie成功")
+                                        return cookie
+                                cookie_header = obj.get("cookie_header")
+                                if isinstance(cookie_header, str) and cookie_header.strip():
+                                    logger.debug("从文件加载cookie成功")
+                                    return cookie_header.strip()
+                        except Exception:
+                            pass
+
+                    logger.debug("从文件加载cookie成功")
+                    return cookie_content
         except Exception as e:
             logger.error(f"加载cookie文件失败: {str(e)}")
         
@@ -84,15 +134,82 @@ class HDHiveResolver:
         """将cookie保存到文件"""
         try:
             # 创建目录（如果不存在）
-            os.makedirs(os.path.dirname(COOKIE_FILE_PATH), exist_ok=True)
-            
-            with open(COOKIE_FILE_PATH, 'w', encoding='utf-8') as f:
-                f.write(cookie)
-            logger.debug(f"cookie已保存到文件: {COOKIE_FILE_PATH}")
+            os.makedirs(os.path.dirname(self.cookie_file_path), exist_ok=True)
+            cookie_dict = self._cookie_header_to_dict(cookie)
+            cookie_header = self._cookie_dict_to_header(cookie_dict)
+            payload = {
+                "cookies": cookie_dict,
+                "cookie_header": cookie_header,
+                "updated_at": int(time.time()),
+            }
+
+            with open(self.cookie_file_path, 'w', encoding='utf-8') as f:
+                json.dump(payload, f, ensure_ascii=False)
+            logger.debug(f"cookie已保存到文件: {self.cookie_file_path}")
             return True
         except Exception as e:
             logger.error(f"保存cookie文件失败: {str(e)}")
             return False
+
+    @staticmethod
+    def _cookie_header_to_dict(cookie_header: str) -> Dict[str, str]:
+        if not cookie_header:
+            return {}
+        cookie_dict: Dict[str, str] = {}
+        for pair in cookie_header.split(";"):
+            pair = pair.strip()
+            if not pair or "=" not in pair:
+                continue
+            name, value = pair.split("=", 1)
+            name = name.strip()
+            value = value.strip()
+            if name:
+                cookie_dict[name] = value
+        return cookie_dict
+
+    @staticmethod
+    def _cookie_dict_to_header(cookie_dict: Dict[str, Any]) -> str:
+        if not cookie_dict:
+            return ""
+        pairs = []
+        for name, value in cookie_dict.items():
+            if value is None:
+                continue
+            name_str = str(name).strip()
+            value_str = str(value).strip()
+            if not name_str:
+                continue
+            pairs.append(f"{name_str}={value_str}")
+        return "; ".join(pairs)
+
+    def _sync_cookie_from_response(self, response: httpx.Response) -> None:
+        set_cookie_list: List[str] = []
+        if hasattr(response.headers, "get_list"):
+            set_cookie_list = response.headers.get_list("Set-Cookie")
+        elif hasattr(response.headers, "getlist"):
+            set_cookie_list = response.headers.getlist("Set-Cookie")
+        else:
+            single = response.headers.get("Set-Cookie")
+            if single:
+                set_cookie_list = [single]
+
+        if not set_cookie_list:
+            return
+
+        cookie_dict = self._cookie_header_to_dict(self.cookie)
+        changed = False
+        for set_cookie in set_cookie_list:
+            parser = SimpleCookie()
+            parser.load(set_cookie)
+            for name, morsel in parser.items():
+                value = morsel.value
+                if cookie_dict.get(name) != value:
+                    cookie_dict[name] = value
+                    changed = True
+
+        if changed:
+            self.cookie = self._cookie_dict_to_header(cookie_dict)
+            self._save_cookie_to_file(self.cookie)
 
     @staticmethod
     @lru_cache(maxsize=4)
@@ -154,50 +271,51 @@ class HDHiveResolver:
             return False
 
         login_url = f"https://hdhive.com/login?redirect={redirect_path}"
-        login_headers = {
-            "content-type": "text/plain;charset=UTF-8",
-            "user-agent": self.user_agent,
-            "next-action": self.login_next_action
-        }
-        login_data = json.dumps([{"username": self.username, "password": self.password}])
 
         try:
-            async with httpx.AsyncClient(timeout=20) as client:
-                response = await self._send(
-                    client,
-                    method="POST",
-                    url=login_url,
-                    headers=login_headers,
-                    content=login_data,
-                    follow_redirects=False,
-                    context={"step": "_re_login", "phase": "login"},
-                )
+            async with self._create_client() as client:
+                if self.server_action_login:
+                    response, _ = await self._call_server_action(
+                        client,
+                        login_url,
+                        self.server_action_login,
+                        [
+                            {"username": self.username, "password": self.password},
+                            redirect_path,
+                        ],
+                        step="_re_login",
+                        phase="login_server_action",
+                    )
+                else:
+                    response = await self._send(
+                        client,
+                        method="POST",
+                        url="https://hdhive.com/login",
+                        headers={
+                            "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
+                            "user-agent": self.user_agent,
+                            "accept": "application/json, text/plain, */*",
+                            "origin": "https://hdhive.com",
+                            "referer": login_url,
+                        },
+                        content=f"username={quote(self.username, safe='')}"
+                        f"&password={quote(self.password, safe='')}"
+                        f"&redirect={quote(redirect_path, safe='/')}",
+                        follow_redirects=True,
+                        context={"step": "_re_login", "phase": "login_form_fallback"},
+                    )
 
-            if response.status_code not in (200, 302):
+            if response.status_code not in (200, 201, 202, 204, 303):
                 self._log_step("_re_login", "output", {"status": "http_error", "http_status": response.status_code})
                 logger.error(f"HDHive登录失败：状态码{response.status_code}")
                 return False
 
-            # 兼容新旧版httpx的headers获取方式
-            set_cookie_list = (response.headers.get_list("Set-Cookie") 
-                              if hasattr(response.headers, "get_list") 
-                              else response.headers.getlist("Set-Cookie"))
-            
-            new_token = None
-            for cookie in set_cookie_list:
-                match = self._token_pattern.search(cookie)
-                if match:
-                    new_token = match.group(1)
-                if new_token:
-                    break
-
-            if not new_token:
-                self._log_step("_re_login", "output", {"status": "missing_token"})
-                logger.error(f"HDHive登录失败：未从响应中提取到Token")
+            self._sync_cookie_from_response(response)
+            if not self.cookie:
+                self._log_step("_re_login", "output", {"status": "missing_cookie"})
+                logger.error("HDHive登录失败：未从响应中提取到Cookie")
                 return False
 
-            # 更新cookie并保存到文件
-            self.cookie = f"token={new_token}"
             self._save_cookie_to_file(self.cookie)
             
             logger.info(f"HDHive自动登录成功，已更新Token")
@@ -238,6 +356,18 @@ class HDHiveResolver:
             "content-type": "application/json",
             "user-agent": self.user_agent,
         }
+        self.cookie = self._load_cookie_from_file()
+        if self.cookie:
+            headers["cookie"] = self.cookie
+        return headers
+
+    def _build_page_headers(self, referer: Optional[str] = None) -> Dict[str, str]:
+        headers = {
+            "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "user-agent": self.user_agent,
+        }
+        if referer:
+            headers["referer"] = referer
         self.cookie = self._load_cookie_from_file()
         if self.cookie:
             headers["cookie"] = self.cookie
@@ -401,6 +531,7 @@ class HDHiveResolver:
                 "context": context or {},
             }
         )
+        self._sync_cookie_from_response(response)
         return response
 
     def _build_action1_payload(self, resource_hash: str) -> str:
@@ -418,31 +549,270 @@ class HDHiveResolver:
         except json.JSONDecodeError:
             return raw.strip().strip('"')
 
+    async def _call_server_action(
+        self,
+        client: httpx.AsyncClient,
+        resource_url: str,
+        action_id: str,
+        args: List[Any],
+        step: str,
+        phase: str,
+    ) -> Tuple[httpx.Response, Optional[Any]]:
+        headers = {
+            "content-type": "text/plain;charset=UTF-8",
+            "user-agent": self.user_agent,
+            "next-action": action_id,
+            "origin": "https://hdhive.com",
+            "referer": resource_url,
+        }
+        self.cookie = self._load_cookie_from_file()
+        if self.cookie:
+            headers["cookie"] = self.cookie
+
+        response = await self._send(
+            client,
+            method="POST",
+            url=resource_url,
+            headers=headers,
+            content=json.dumps(args, ensure_ascii=False, separators=(",", ":")),
+            follow_redirects=True,
+            context={"step": step, "phase": phase, "action_id": action_id},
+        )
+
+        value = self._extract_indexed_value(response.text, 1)
+        return response, value
+
+    async def _server_action_encrypt(self, client: httpx.AsyncClient, resource_url: str, payload: Dict[str, Any]) -> Optional[str]:
+        self._log_step("_server_action_encrypt", "input", {"resource_url": resource_url, "payload_keys": list(payload.keys())})
+        raw_payload = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        response, value = await self._call_server_action(
+            client,
+            resource_url,
+            self.server_action_encrypt,
+            [raw_payload],
+            step="_server_action_encrypt",
+            phase="server_action_encrypt",
+        )
+        if response.status_code in (401, 403):
+            self._log_step("_server_action_encrypt", "output", {"status": "need_relogin", "http_status": response.status_code})
+            return None
+        if not isinstance(value, str) or not value:
+            self._log_step("_server_action_encrypt", "output", {"status": "empty"})
+            return None
+        self._log_step("_server_action_encrypt", "output", {"status": "ok", "value_length": len(value)})
+        return value
+
+    async def _server_action_decrypt(self, client: httpx.AsyncClient, resource_url: str, encrypted: str) -> Optional[Dict[str, Any]]:
+        self._log_step("_server_action_decrypt", "input", {"resource_url": resource_url, "payload_length": len(encrypted) if encrypted else 0})
+        response, value = await self._call_server_action(
+            client,
+            resource_url,
+            self.server_action_decrypt,
+            [encrypted],
+            step="_server_action_decrypt",
+            phase="server_action_decrypt",
+        )
+        if response.status_code in (401, 403):
+            self._log_step("_server_action_decrypt", "output", {"status": "need_relogin", "http_status": response.status_code})
+            return None
+        if not isinstance(value, dict):
+            self._log_step("_server_action_decrypt", "output", {"status": "invalid_payload_type"})
+            return None
+        self._log_step("_server_action_decrypt", "output", {"status": "ok", "keys": list(value.keys())})
+        return value
+
+    def _extract_115_url_from_text(self, text: str, base_url: Optional[str] = None) -> Optional[str]:
+        if not text:
+            return None
+
+        # 先找所有http链接
+        for match in self._url_pattern.finditer(text):
+            candidate = match.group(0).strip().rstrip('"\'<>])')
+            candidate = re.sub(r"[\"'<].*$", "", candidate)
+            if "115" in candidate or "115cdn" in candidate:
+                return candidate
+
+        # 再从HTML属性中抓取可能链接
+        attr_pattern = re.compile(r"(?:href|src)=[\"']([^\"']+)[\"']", re.IGNORECASE)
+        for attr_match in attr_pattern.finditer(text):
+            raw = unescape(attr_match.group(1).strip())
+            if not raw:
+                continue
+            if raw.startswith("/") and base_url:
+                raw = urljoin(base_url, raw)
+            if raw.startswith("http") and ("115" in raw or "115cdn" in raw):
+                return raw
+
+        return None
+
+    def _extract_unlock_cost(self, text: str) -> int:
+        if not text:
+            return 0
+        match = self._pts_pattern.search(text)
+        if not match:
+            return 0
+        pts = match.group(1)
+        if pts and pts.isdigit():
+            return int(pts)
+        return 0
+
+    def _is_need_login(self, response: httpx.Response) -> bool:
+        if response.status_code in (401, 403):
+            return True
+        body = response.text or ""
+        return any(
+            keyword in body
+            for keyword in (
+                "请先登录",
+                "登录已过期",
+                "NEXT_REDIRECT;replace;/login",
+                "登录 - HDHive",
+            )
+        )
+
+    def _is_need_unlock(self, response: httpx.Response) -> bool:
+        body = response.text or ""
+        if re.search(r"需要使用\s*\d+\s*积分", body):
+            return True
+        if re.search(r'"unlock_points"\s*:\s*[1-9]\d*', body):
+            return True
+        return False
+
+    def _extract_unlock_payload(self, text: str) -> Optional[str]:
+        if not text:
+            return None
+
+        patterns = [
+            r"unlockData\s*[:=]\s*['\"]([^'\"]+)['\"]",
+            r"unlock_data\s*[:=]\s*['\"]([^'\"]+)['\"]",
+            r"data\s*[:=]\s*['\"]([^'\"]+)['\"]",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, text, flags=re.IGNORECASE)
+            if match and match.group(1):
+                return match.group(1)
+
+        return None
+
+    def _extract_resource_hash_from_url(self, url: str) -> Optional[str]:
+        parsed = urlparse(url)
+        if not parsed.path:
+            return None
+        match = re.search(r"/resource/(?:\d+/)?([0-9a-fA-F]{32})", parsed.path)
+        if not match:
+            return None
+        return match.group(1)
+
+    def _append_password_if_needed(self, url: str, access_code: Optional[str]) -> str:
+        if not url:
+            return url
+        if not access_code:
+            return url
+        if "password=" in url or "pwd=" in url:
+            return url
+        separator = "&" if "?" in url else "?"
+        return f"{url}{separator}password={access_code}"
+
+    def _extract_final_url_from_decrypted(self, dec_obj: Optional[Dict[str, Any]]) -> Optional[str]:
+        if not dec_obj or not isinstance(dec_obj, dict):
+            return None
+
+        for key in ("full_url", "url"):
+            raw = dec_obj.get(key)
+            if isinstance(raw, str) and raw.startswith("http"):
+                access_code = dec_obj.get("access_code")
+                access_code = access_code if isinstance(access_code, str) else ""
+                return self._append_password_if_needed(raw, access_code)
+
+        return None
+
+    async def _fetch_resource_page(
+        self,
+        client: httpx.AsyncClient,
+        resource_url: str,
+        allow_relogin: bool = True,
+    ) -> Optional[httpx.Response]:
+        headers = self._build_page_headers(referer="https://hdhive.com/")
+        response = await self._send(
+            client,
+            method="GET",
+            url=resource_url,
+            headers=headers,
+            follow_redirects=True,
+            context={"step": "_resolve_direct_page", "phase": "resource_page"},
+        )
+
+        if self._is_need_login(response):
+            self._log_step("_resolve_direct_page", "output", {"status": "need_relogin"})
+            if allow_relogin and await self._re_login(resource_url):
+                return await self._fetch_resource_page(client, resource_url, allow_relogin=False)
+            self._log_step("_resolve_direct_page", "output", {"status": "relogin_failed"})
+            return None
+
+        return response
+
+    async def _unlock_with_direct_flow(
+        self,
+        client: httpx.AsyncClient,
+        resource_url: str,
+        resource_hash: Optional[str],
+        page_response: httpx.Response,
+    ) -> bool:
+        body = page_response.text or ""
+        pts = self._extract_unlock_cost(body)
+        self.pts = pts
+
+        if pts >= self.unlock_threshold:
+            self.unlock_failed = True
+            self._log_step(
+                "resolve_url",
+                "output",
+                {"status": "unlock_blocked", "pts": pts, "unlock_threshold": self.unlock_threshold},
+            )
+            return False
+
+        # 新版流程不再依赖页面里显式 unlock payload，使用加密 query 驱动 go-api unlock
+        unlock_payload = self._extract_unlock_payload(body)
+        if not resource_hash:
+            resource_hash = self._extract_resource_hash_from_url(resource_url)
+
+        if not resource_hash:
+            self.unlock_failed = True
+            self._log_step("resolve_url", "output", {"status": "unlock_missing_hash"})
+            return False
+
+        # 优先：若页面直接包含 payload 则先尝试
+        if unlock_payload:
+            unlock_result = await self._go_api_unlock(client, resource_url, resource_hash, unlock_payload)
+            if unlock_result:
+                return True
+
+        # 主路径：使用 server-action 加密的 query 调用 unlock
+        fallback_query = await self._action1_get_query(client, resource_url, resource_hash)
+        if fallback_query:
+            unlock_result = await self._go_api_unlock(client, resource_url, resource_hash, fallback_query)
+            if unlock_result:
+                return True
+
+        self.unlock_failed = True
+        self._log_step("resolve_url", "output", {"status": "unlock_failed", "pts": pts})
+        return False
+
     async def _action1_get_query(self, client: httpx.AsyncClient, resource_url: str, resource_hash: str) -> Optional[str]:
         self._log_step(
             "_action1_get_query",
             "input",
             {"resource_url": resource_url, "resource_hash": resource_hash},
         )
-        payload = self._build_action1_payload(resource_hash)
+        payload_obj = {"slug": resource_hash, "utctimestamp": int(time.time())}
         for _ in range(2):
-            headers1 = self._build_headers(self.next_action_first)
-            response = await self._send(
-                client,
-                method="POST",
-                url=resource_url,
-                headers=headers1,
-                content=payload,
-                context={"step": "_action1_get_query", "phase": "action1"},
-            )
-            if response.status_code == 401 or "请先登录" in response.text or "登录已过期" in response.text:
+            query = await self._server_action_encrypt(client, resource_url, payload_obj)
+            if not query:
                 self._log_step("_action1_get_query", "output", {"status": "need_relogin"})
                 if not await self._re_login(resource_url):
                     self._log_step("_action1_get_query", "output", {"status": "relogin_failed"})
                     return None
                 continue
-            response.raise_for_status()
-            query = self._extract_indexed_value(response.text, 1)
             query_str = query if isinstance(query, str) and query else None
             self._log_step(
                 "_action1_get_query",
@@ -495,6 +865,13 @@ class HDHiveResolver:
                 if code == "400404" and "需要使用" in msg and "积分解锁" in msg:
                     match = self._pts_pattern.search(msg)
                     pts = int(match.group(1)) if (match and match.group(1).isdigit()) else 0
+                    encrypted_data = obj.get("data")
+                    if isinstance(encrypted_data, str) and encrypted_data:
+                        dec_obj = await self._server_action_decrypt(client, resource_url, encrypted_data)
+                        if dec_obj and isinstance(dec_obj, dict):
+                            unlock_points = dec_obj.get("unlock_points")
+                            if isinstance(unlock_points, int):
+                                pts = unlock_points
                     self._log_step(
                         "_go_api_get_data_str",
                         "output",
@@ -634,52 +1011,79 @@ class HDHiveResolver:
         self._log_step("resolve_url", "input", {"url": url})
         self.pts = 0
         self.unlock_failed = False
-        h = self._extract_hash(url)
-        if not h:
-            self._log_step("resolve_url", "output", {"status": "invalid_url", "url": url})
-            logger.error(f"无效的HDHive链接：{url}")
-            return None
-        self._log_step("resolve_url", "output", {"resource_hash": h})
+        h = self._extract_hash(url) or self._extract_resource_hash_from_url(url)
+        if h:
+            self._log_step("resolve_url", "output", {"resource_hash": h})
         
         try:
-            async with httpx.AsyncClient(timeout=20) as client:
-                max_attempts = 3
-                for _ in range(max_attempts):
-                    query = await self._action1_get_query(client, url, h)
-                    if not query:
-                        self._log_step("resolve_url", "output", {"status": "action1_failed"})
+            async with self._create_client() as client:
+                for _ in range(3):
+                    page_response = await self._fetch_resource_page(client, url)
+                    if not page_response:
                         return None
 
-                    data_str, requires_unlock, pts = await self._go_api_get_data_str(client, url, h, query)
-                    if requires_unlock:
-                        self.pts = pts
-                        if pts >= self.unlock_threshold:
+                    # 1) 先尝试页面直接提取直链
+                    final_url = self._extract_115_url_from_text(page_response.text, str(page_response.url))
+                    if final_url:
+                        self._log_step(
+                            "resolve_url",
+                            "output",
+                            {"status": "ok", "final_url": self._preview_text(final_url, 300)},
+                        )
+                        return final_url
+
+                    # 2) 主路径：server-action加密query -> go-api拿数据
+                    if h:
+                        query = await self._action1_get_query(client, url, h)
+                        if not query:
+                            self._log_step("resolve_url", "output", {"status": "action1_failed"})
+                            return None
+
+                        data_str, requires_unlock, pts = await self._go_api_get_data_str(client, url, h, query)
+                        if requires_unlock:
+                            self.pts = pts
+                            if pts >= self.unlock_threshold:
+                                self._log_step(
+                                    "resolve_url",
+                                    "output",
+                                    {"status": "unlock_blocked", "pts": pts, "unlock_threshold": self.unlock_threshold},
+                                )
+                                logger.error(f"解锁所需积分{pts}≥阈值{self.unlock_threshold}，无法解锁")
+                                self.unlock_failed = True
+                                return None
+
+                            unlocked = await self._unlock_with_direct_flow(client, url, h, page_response)
+                            if not unlocked:
+                                self._log_step("resolve_url", "output", {"status": "unlock_failed", "pts": pts})
+                                self.unlock_failed = True
+                                return None
+                            logger.info("go-api解锁成功，重新拉取资源状态")
+                            continue
+
+                        if data_str:
+                            dec_obj = await self._server_action_decrypt(client, url, data_str)
+                            final_url = self._extract_final_url_from_decrypted(dec_obj)
+                            if not final_url:
+                                final_url = await self._get_final_url(client, url, data_str)
+
                             self._log_step(
                                 "resolve_url",
                                 "output",
-                                {"status": "unlock_blocked", "pts": pts, "unlock_threshold": self.unlock_threshold},
+                                {"status": "ok", "final_url": self._preview_text(final_url, 300) if final_url else None},
                             )
-                            logger.error(f"解锁所需积分{pts}≥阈值{self.unlock_threshold}，无法解锁")
-                            self.unlock_failed = True
-                            return None
-                        unlock_data = await self._go_api_unlock(client, url, h, query)
-                        if not unlock_data:
-                            self._log_step("resolve_url", "output", {"status": "unlock_failed", "pts": pts})
-                            self.unlock_failed = True
-                            return None
-                        
-                        # 解锁成功后，需要重新走一遍流程获取最新的query和data_str
-                        # 因为解锁后，服务器状态变了，原来的query可能失效或需要更新
-                        logger.info(f"解锁成功，重新获取资源数据...")
-                        continue
+                            if final_url:
+                                return final_url
 
-                    if not data_str:
-                        self._log_step("resolve_url", "output", {"status": "go_api_no_data"})
+                    # 3) 兜底：页面上判断需解锁但go-api路径未识别到
+                    if self._is_need_unlock(page_response):
+                        unlocked = await self._unlock_with_direct_flow(client, url, h, page_response)
+                        if unlocked:
+                            logger.info("解锁成功，重新访问资源页获取直链")
+                            continue
                         return None
 
-                    final_url = await self._get_final_url(client, url, data_str)
-                    self._log_step("resolve_url", "output", {"status": "ok", "final_url": self._preview_text(final_url, 300) if final_url else None})
-                    return final_url
+                    self._log_step("resolve_url", "output", {"status": "no_final_url"})
+                    return None
                 return None
 
         except Exception as e:
@@ -726,7 +1130,7 @@ class HDHiveResolver:
             if isinstance(domain, str) and domain.strip()
         ]
 
-        if "hdhive.com" not in text:
+        if "hdhive.com" not in text and "hdhive.online" not in text:
             self._log_step("rewrite_text", "output", {"status": "skip_no_domain"})
             if ignore_domains:
                 replaced, ignored_count = self._remove_ignored_links(text, ignore_domains)
@@ -740,6 +1144,8 @@ class HDHiveResolver:
             return text
         
         matches = list(self._resource_pattern.finditer(text))
+        if not matches:
+            matches = list(self._hdhive_url_pattern.finditer(text))
         if not matches:
             self._log_step("rewrite_text", "output", {"status": "no_match"})
             replaced = text.replace("直达链接", "解锁失败")

@@ -51,7 +51,7 @@ graph TD
 | YouTubeHandler | `handlers/youtube_handler.py` | Downloads YouTube videos via yt-dlp |
 | DouyinHandler | `handlers/douyin_handler.py` | Downloads Douyin videos |
 | BilibiliHandler | `handlers/bilibili_handler.py` | Downloads Bilibili videos |
-| HDHiveResolver | `handlers/hdhive_handler.py` | Resolves HDHive links |
+| HDHiveResolver | `handlers/hdhive_handler.py` | Resolves HDHive links via server-action + go-api flow |
 
 ### SchedulerService (`src/services/scheduler_service.py`)
 - Uses APScheduler for scheduling
@@ -81,3 +81,11 @@ graph TD
 2. Keyword filtering (include/exclude) applied
 3. Link filtering (forwardIgnoreLink) applied  
 4. Message forwarded to target chat
+
+### HDHive Resolution Flow
+1. `EventHandler` detects HDHive links and delegates to `HDHiveResolver`.
+2. Resolver opens resource page directly with persisted cookie.
+3. If auth is missing/expired, resolver performs server-action login and refreshes cookie.
+4. Resolver tries direct 115 link extraction from page response.
+5. If no direct link, resolver encrypts query payload, calls go-api URL endpoint, and decrypts returned data.
+6. If unlock is required and points are below threshold, resolver calls unlock endpoint and retries until final 115 link is obtained.

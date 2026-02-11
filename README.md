@@ -1,6 +1,6 @@
 # TelegramAssistant - Telegram 助手
 
-这是一个基于 Telethon 的 Telegram 机器人，可以自动下载 Telegram 消息中的视频内容和 YouTube 链接。
+这是一个基于 Telethon 的 Telegram 机器人，可以自动下载 Telegram 消息中的媒体内容，并处理 YouTube、Bilibili、抖音和 HDHive 链接。
 
 ## 功能特性
 
@@ -8,6 +8,7 @@
 - 支持下载 YouTube 视频和播放列表
 - 支持下载 Bilibili 视频
 - 支持下载 抖音 视频
+- 支持 HDHive 链接解析（自动登录、按积分阈值解锁、提取 115/115cdn 直链）
 - 支持代理配置
 - 支持 Docker 部署
 - 支持定时发送消息
@@ -29,7 +30,7 @@
 
 ```bash
 git clone [repository-url]
-cd TelegramAssistant
+cd TelegramAssistantCustom
 ```
 
 2. 安装依赖：
@@ -53,7 +54,7 @@ pip install -r requirements.txt
 version: '3'
 services:
   telegram_assistant:
-    image: shenxianmq/telegram_assistant:latest
+    image: acecandy/ta-custom:latest
     volumes:
       - ./config:/app/config
       - ./downloads/telegram:/app/downloads/telegram
@@ -90,7 +91,7 @@ docker restart telegram_assistant
 
 ```bash
 # 拉取镜像
-docker pull shenxianmq/telegram_assistant:latest
+docker pull acecandy/ta-custom:latest
 
 # 创建必要的目录
 mkdir -p config downloads/telegram downloads/youtube
@@ -104,7 +105,7 @@ docker run -d \
   -v $(pwd)/downloads/bilibili:/app/downloads/bilibili \
   -v $(pwd)/downloads/douyin:/app/downloads/douyin \
   --restart unless-stopped \
-  shenxianmq/telegram_assistant:latest
+  acecandy/ta-custom:latest
 
 # 进入容器进行初始化配置
 docker exec -it telegram_assistant python /app/init.py
@@ -189,6 +190,21 @@ douyin:
 bilibili:
   cookie: "" # Bilibili cookies（可选，用于下载Bilibili视频）
 
+# HDHive 解析配置（可选）
+hdhive:
+  username: "" # HDHive 登录账号（邮箱）
+  password: "" # HDHive 登录密码
+  unlock_threshold: 20 # 解锁积分阈值：所需积分 >= 阈值时不自动解锁
+  user_agent: "Mozilla/5.0 ..." # 请求UA
+  cookie_file_path: "/app/config/hdhive.json" # 登录Cookie持久化文件
+  server_action_login: "605db6f9f9097005c3efa316327b49963e8872c8c6"
+  server_action_encrypt: "40f37785abc6ff4ada97734df369877f373d8b1002"
+  server_action_decrypt: "40a9013be8da6c1b4846eb2bbca43f1339a4fb4f4b"
+  next_action_first: "" # 兼容回退项
+  next_action_second: "" # 兼容回退项
+  next_action_unlock: "" # 兼容回退项
+  login_next_action: "" # 兼容回退项
+
 # 权限控制配置（可选）
 allowed_chat_ids: [] # 允许使用视频下载功能的chat_id列表，留空表示允许所有用户
 # 示例：
@@ -253,11 +269,28 @@ proxy:
 
    - `cookie`：用于下载 Bilibili 视频，需要提供 cookies 字符串
 
-9. **权限控制配置**：
+9. **HDHive 解析配置**：
+
+   - `username` / `password`：HDHive 登录凭证（解析前需要登录）
+   - `cookie_file_path`：登录 Cookie 的本地持久化路径，后续请求会复用
+   - `unlock_threshold`：解锁积分阈值；当资源所需积分 `>= unlock_threshold` 时，不会自动解锁
+   - `server_action_login` / `server_action_encrypt` / `server_action_decrypt`：新版站点流程核心参数
+   - 兼容项 `next_action_*` / `login_next_action` 仍保留用于回退
+
+10. **权限控制配置**：
    - `allowed_chat_ids`：限制只有指定的 chat_id 才能使用视频下载功能
    - 留空（`[]`）表示允许所有用户使用
    - 支持个人 chat_id、群组 chat_id 和用户名
    - 如何获取 chat_id：未授权用户尝试使用时会在日志中记录其 chat_id
+
+## HDHive 解析逻辑
+
+- 支持域名：`hdhive.com`、`hdhive.online`
+- 遇到 HDHive 链接后先直接访问资源页，优先提取页面中的 115/115cdn 直链
+- 如提示未登录或登录过期，自动执行登录并更新本地 Cookie
+- Cookie 会保存到 `hdhive.cookie_file_path`，下次优先复用，不需要每次重新登录
+- 若页面无直链，则走 `server_action_encrypt -> go-api -> server_action_decrypt` 获取最终 115 链接
+- 若资源需要积分解锁，仅当所需积分 `< unlock_threshold` 才会自动解锁；当所需积分 `>= unlock_threshold` 时会停止解析并返回解锁失败
 
 ## 使用方法
 
@@ -270,8 +303,8 @@ python main.py
 2. 在 Telegram 中：
 
 - 发送 `/start` 开始使用
-- 转发视频或发送 YouTube 链接给机器人
-- 机器人会自动下载并保存到指定目录
+- 转发视频或发送 YouTube/Bilibili/抖音/HDHive 链接给机器人
+- 机器人会自动下载资源，HDHive 链接会自动解析为 115/115cdn 直链
 
 ## 权限控制
 
@@ -300,7 +333,7 @@ allowed_chat_ids:
 
 ### 权限功能说明：
 
-- ✅ 支持的功能：YouTube、抖音、B 站、Telegram 媒体文件下载
+- ✅ 支持的功能：YouTube、抖音、B 站、HDHive、Telegram 媒体文件下载
 - ✅ 未授权用户会收到友好提示："❌ 抱歉，您没有权限使用此功能。"
 - ✅ 所有未授权访问尝试都会记录在日志中
 - ✅ 支持个人 ID、群组 ID 和用户名格式
