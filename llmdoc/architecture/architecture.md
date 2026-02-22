@@ -83,9 +83,12 @@ graph TD
 4. Message forwarded to target chat
 
 ### HDHive Resolution Flow
-1. `EventHandler` detects HDHive links and delegates to `HDHiveResolver`.
-2. Resolver opens resource page directly with persisted cookie.
-3. If auth is missing/expired, resolver performs server-action login and refreshes cookie.
-4. Resolver tries direct 115 link extraction from page response.
-5. If no direct link, resolver encrypts query payload, calls go-api URL endpoint, and decrypts returned data.
-6. If unlock is required and points are below threshold, resolver calls unlock endpoint and retries until final 115 link is obtained.
+1. `EventHandler` assembles transfer text from message body + button URLs + URL entities, then delegates HDHive links to `HDHiveResolver`.
+2. `HDHiveResolver` detects `hdhive.*` links case-insensitively and extracts resource hash.
+3. Resolver opens resource page directly with persisted cookie.
+4. If auth is missing/expired, resolver performs server-action login and refreshes cookie.
+5. Resolver tries direct 115 link extraction from page response.
+6. If no direct link, resolver encrypts query payload, calls go-api URL endpoint, and decrypts returned data.
+7. If unlock is required and points are below threshold, resolver calls unlock endpoint and retries until final 115 link is obtained.
+8. Login/server-action/go-api requests use the incoming resource URL origin to tolerate HDHive domain switches.
+9. If server-action returns `action not found`, resolver refreshes action IDs from current chunk scripts and retries.

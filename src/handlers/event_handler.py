@@ -59,6 +59,32 @@ class EventHandler:
         separator = "\n" if message_text else ""
         return f"{message_text}{separator}{'\n'.join(lines)}"
 
+    @staticmethod
+    def _append_entity_urls(message_text: str, message) -> str:
+        entities = getattr(message, "entities", None) or []
+        if not entities:
+            return message_text
+
+        lines = []
+        existing_urls = set(re.findall(r"https?://\S+", message_text or "", re.IGNORECASE))
+        for entity in entities:
+            url = getattr(entity, "url", None)
+            if not isinstance(url, str):
+                continue
+            url = url.strip()
+            if not url.startswith(("http://", "https://")):
+                continue
+            if url in existing_urls:
+                continue
+            lines.append(url)
+            existing_urls.add(url)
+
+        if not lines:
+            return message_text
+
+        separator = "\n" if message_text else ""
+        return f"{message_text}{separator}{'\n'.join(lines)}"
+
     def is_chat_allowed(self, chat_id):
         """检查chat_id是否在允许列表中"""
         # 如果allowed_chat_ids为空列表，则允许所有
@@ -177,6 +203,9 @@ class EventHandler:
                         should_transfer = True
                         message_text = event.message.text if event.message.text else ""
                         message_text = self._append_button_text(
+                            message_text, event.message
+                        )
+                        message_text = self._append_entity_urls(
                             message_text, event.message
                         )
                         ignore_links = transfer.get("forwardIgnoreLink", [])
@@ -317,6 +346,9 @@ class EventHandler:
                 should_transfer = True
                 message_text = event.message.text if event.message.text else ""
                 message_text = self._append_button_text(
+                    message_text, event.message
+                )
+                message_text = self._append_entity_urls(
                     message_text, event.message
                 )
                 ignore_links = transfer.get("forwardIgnoreLink", [])

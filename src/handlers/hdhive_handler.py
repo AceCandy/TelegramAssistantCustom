@@ -17,9 +17,9 @@ logger = logging.getLogger(__name__)
 COOKIE_FILE_PATH = "/app/config/hdhive.json"
 
 # HDHive Next.js Server Action IDs（2026-02）
-DEFAULT_SERVER_ACTION_LOGIN = "605db6f9f9097005c3efa316327b49963e8872c8c6"
-DEFAULT_SERVER_ACTION_ENCRYPT = "40f37785abc6ff4ada97734df369877f373d8b1002"
-DEFAULT_SERVER_ACTION_DECRYPT = "40a9013be8da6c1b4846eb2bbca43f1339a4fb4f4b"
+DEFAULT_SERVER_ACTION_LOGIN = "60117d32a5f428137a3759c2470ea04fd5bc035e45"
+DEFAULT_SERVER_ACTION_ENCRYPT = "4009ae744a7d94ccc9b0f0ff4e3f5bc55d39a111ad"
+DEFAULT_SERVER_ACTION_DECRYPT = "40c9c3d9fd41a3ddb01539b93b112ebf0dd6e5f98f"
 
 class HDHiveResolver:
     """HDHive资源链接解析器"""
@@ -56,13 +56,16 @@ class HDHiveResolver:
         # 状态变量
         self.pts = 0
         self.unlock_failed = False
+        self._last_action_discovery_at = 0.0
         
         # 编译正则表达式（性能优化）
         self._resource_pattern = re.compile(
-            r"https?://(?:www\.)?hdhive\.(?:com|online)/resource/(?:(\d+)/)?([0-9a-fA-F]{32})"
+            r"https?://(?:[\w-]+\.)?hdhive\.[a-z0-9.-]+/resource/(?:(\d+)/)?([0-9a-fA-F]{32})",
+            re.IGNORECASE,
         )
         self._hdhive_url_pattern = re.compile(
-            r"https?://(?:www\.)?hdhive\.(?:com|online)/[^\s\]\[\)\(<>\"']+"
+            r"https?://(?:[\w-]+\.)?hdhive\.[a-z0-9.-]+/[^\s\]\[\)\(<>\"']+",
+            re.IGNORECASE,
         )
         self._token_pattern = re.compile(r"token=([^;]+)")
         self._pts_pattern = re.compile(r"需要使用\s*(\d+)\s*积分")
@@ -77,6 +80,7 @@ class HDHiveResolver:
         "_re_login": "🔐 自动登录",
         "_server_action_encrypt": "🔐 加密参数",
         "_server_action_decrypt": "🔓 解密数据",
+        "_discover_server_actions": "🧭 刷新Action ID",
         "_resolve_direct_page": "🌐 直访资源页",
         "_action1_get_query": "🔍 获取查询参数",
         "_go_api_get_data_str": "📡 获取数据",
@@ -232,6 +236,146 @@ class HDHiveResolver:
             return f"/resource/{resource_id}/{resource_hash}"
         return f"/resource/{resource_hash}"
 
+    @staticmethod
+    def _is_action_not_found_response(response: Optional[httpx.Response]) -> bool:
+        if response is None:
+            return False
+        if response.status_code != 404:
+            return False
+        marker = response.headers.get("x-nextjs-action-not-found", "")
+        body = response.text or ""
+        return marker == "1" or "Server action not found" in body
+
+    @staticmethod
+    def _extract_chunk_script_urls(html: str, base_origin: str) -> List[str]:
+        if not html:
+            return []
+        pattern = re.compile(
+            r"src=[\"']((?:https?://[^\"']+)?/_next/static/chunks/[^\"']+\.js)[\"']",
+            re.IGNORECASE,
+        )
+        urls: List[str] = []
+        seen: set[str] = set()
+        for match in pattern.finditer(html):
+            raw_url = match.group(1)
+            if raw_url.startswith("//"):
+                script_url = f"https:{raw_url}"
+            elif raw_url.startswith("/"):
+                script_url = urljoin(base_origin, raw_url)
+            else:
+                script_url = raw_url
+            if script_url in seen:
+                continue
+            seen.add(script_url)
+            urls.append(script_url)
+        return urls
+
+    async def _discover_server_actions(self, client: httpx.AsyncClient, resource_url: str) -> bool:
+        self._log_step("_discover_server_actions", "input", {"resource_url": resource_url})
+
+        now = time.time()
+        if now - self._last_action_discovery_at < 5:
+            self._log_step("_discover_server_actions", "output", {"status": "throttled"})
+            return False
+        self._last_action_discovery_at = now
+
+        base_origin = self._get_base_origin(resource_url)
+        redirect_path = self._extract_resource_path(resource_url) or "/"
+        page_urls = [
+            resource_url,
+            f"{base_origin}/login?redirect={redirect_path}",
+        ]
+
+        chunk_urls: List[str] = []
+        for page_url in page_urls:
+            try:
+                response = await client.request(
+                    "GET",
+                    page_url,
+                    headers=self._build_page_headers(referer=f"{base_origin}/"),
+                    follow_redirects=True,
+                )
+                self._sync_cookie_from_response(response)
+            except Exception as e:
+                self._log_step(
+                    "_discover_server_actions",
+                    "output",
+                    {"status": "page_request_failed", "page_url": page_url, "error": str(e)},
+                )
+                continue
+
+            if response.status_code >= 400:
+                continue
+            chunk_urls.extend(self._extract_chunk_script_urls(response.text, base_origin))
+
+        if not chunk_urls:
+            self._log_step("_discover_server_actions", "output", {"status": "no_chunk_urls"})
+            return False
+
+        dedup_chunk_urls: List[str] = []
+        seen_chunk_urls = set()
+        for chunk_url in chunk_urls:
+            if chunk_url in seen_chunk_urls:
+                continue
+            seen_chunk_urls.add(chunk_url)
+            dedup_chunk_urls.append(chunk_url)
+
+        action_pattern = re.compile(
+            r'createServerReference\)?\("([a-f0-9]{40,})"[^\)]{0,500},"([A-Za-z_][A-Za-z0-9_]*)"\)',
+            re.IGNORECASE,
+        )
+        discovered: Dict[str, str] = {}
+
+        for chunk_url in dedup_chunk_urls[:80]:
+            try:
+                response = await client.request("GET", chunk_url, headers={"user-agent": self.user_agent})
+            except Exception:
+                continue
+
+            if response.status_code != 200:
+                continue
+
+            text = response.text or ""
+            for action_id, action_name in action_pattern.findall(text):
+                action_name_l = action_name.lower()
+                if "decrypt" in action_name_l:
+                    discovered["decrypt"] = action_id
+                elif "encryp" in action_name_l:
+                    discovered["encrypt"] = action_id
+                elif action_name_l == "login":
+                    discovered["login"] = action_id
+
+        updated = False
+        if discovered.get("login") and discovered["login"] != self.server_action_login:
+            self.server_action_login = discovered["login"]
+            updated = True
+        if discovered.get("encrypt") and discovered["encrypt"] != self.server_action_encrypt:
+            self.server_action_encrypt = discovered["encrypt"]
+            updated = True
+        if discovered.get("decrypt") and discovered["decrypt"] != self.server_action_decrypt:
+            self.server_action_decrypt = discovered["decrypt"]
+            updated = True
+
+        self._log_step(
+            "_discover_server_actions",
+            "output",
+            {
+                "status": "updated" if updated else "not_changed",
+                "chunk_count": len(dedup_chunk_urls),
+                "found_login": bool(discovered.get("login")),
+                "found_encrypt": bool(discovered.get("encrypt")),
+                "found_decrypt": bool(discovered.get("decrypt")),
+            },
+        )
+        return updated
+
+    def _get_base_origin(self, resource_url: Optional[str]) -> str:
+        if resource_url:
+            parsed = urlparse(resource_url)
+            if parsed.scheme and parsed.netloc and "hdhive" in parsed.netloc.lower():
+                return f"{parsed.scheme}://{parsed.netloc}"
+        return "https://hdhive.com"
+
     def _find_json_object(self, text: str, key_hint: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """从文本中查找JSON对象"""
         lines = text.splitlines()
@@ -270,10 +414,12 @@ class HDHiveResolver:
             logger.error("HDHive自动登录失败：无法从链接中提取资源路径")
             return False
 
-        login_url = f"https://hdhive.com/login?redirect={redirect_path}"
+        base_origin = self._get_base_origin(resource_url)
+        login_url = f"{base_origin}/login?redirect={redirect_path}"
 
         try:
             async with self._create_client() as client:
+                response: Optional[httpx.Response] = None
                 if self.server_action_login:
                     response, _ = await self._call_server_action(
                         client,
@@ -286,16 +432,35 @@ class HDHiveResolver:
                         step="_re_login",
                         phase="login_server_action",
                     )
-                else:
+                    if self._is_action_not_found_response(response):
+                        self._log_step(
+                            "_re_login",
+                            "output",
+                            {"status": "action_not_found", "action_id": self.server_action_login},
+                        )
+                        if await self._discover_server_actions(client, resource_url):
+                            response, _ = await self._call_server_action(
+                                client,
+                                login_url,
+                                self.server_action_login,
+                                [
+                                    {"username": self.username, "password": self.password},
+                                    redirect_path,
+                                ],
+                                step="_re_login",
+                                phase="login_server_action_retry",
+                            )
+
+                if (not self.server_action_login) or self._is_action_not_found_response(response):
                     response = await self._send(
                         client,
                         method="POST",
-                        url="https://hdhive.com/login",
+                        url=f"{base_origin}/login",
                         headers={
                             "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
                             "user-agent": self.user_agent,
                             "accept": "application/json, text/plain, */*",
-                            "origin": "https://hdhive.com",
+                            "origin": base_origin,
                             "referer": login_url,
                         },
                         content=f"username={quote(self.username, safe='')}"
@@ -562,7 +727,7 @@ class HDHiveResolver:
             "content-type": "text/plain;charset=UTF-8",
             "user-agent": self.user_agent,
             "next-action": action_id,
-            "origin": "https://hdhive.com",
+            "origin": self._get_base_origin(resource_url),
             "referer": resource_url,
         }
         self.cookie = self._load_cookie_from_file()
@@ -593,6 +758,22 @@ class HDHiveResolver:
             step="_server_action_encrypt",
             phase="server_action_encrypt",
         )
+        if self._is_action_not_found_response(response):
+            self._log_step(
+                "_server_action_encrypt",
+                "output",
+                {"status": "action_not_found", "action_id": self.server_action_encrypt},
+            )
+            if await self._discover_server_actions(client, resource_url):
+                response, value = await self._call_server_action(
+                    client,
+                    resource_url,
+                    self.server_action_encrypt,
+                    [raw_payload],
+                    step="_server_action_encrypt",
+                    phase="server_action_encrypt_retry",
+                )
+
         if response.status_code in (401, 403):
             self._log_step("_server_action_encrypt", "output", {"status": "need_relogin", "http_status": response.status_code})
             return None
@@ -612,6 +793,22 @@ class HDHiveResolver:
             step="_server_action_decrypt",
             phase="server_action_decrypt",
         )
+        if self._is_action_not_found_response(response):
+            self._log_step(
+                "_server_action_decrypt",
+                "output",
+                {"status": "action_not_found", "action_id": self.server_action_decrypt},
+            )
+            if await self._discover_server_actions(client, resource_url):
+                response, value = await self._call_server_action(
+                    client,
+                    resource_url,
+                    self.server_action_decrypt,
+                    [encrypted],
+                    step="_server_action_decrypt",
+                    phase="server_action_decrypt_retry",
+                )
+
         if response.status_code in (401, 403):
             self._log_step("_server_action_decrypt", "output", {"status": "need_relogin", "http_status": response.status_code})
             return None
@@ -732,7 +929,8 @@ class HDHiveResolver:
         resource_url: str,
         allow_relogin: bool = True,
     ) -> Optional[httpx.Response]:
-        headers = self._build_page_headers(referer="https://hdhive.com/")
+        base_origin = self._get_base_origin(resource_url)
+        headers = self._build_page_headers(referer=f"{base_origin}/")
         response = await self._send(
             client,
             method="GET",
@@ -828,7 +1026,8 @@ class HDHiveResolver:
             "input",
             {"resource_url": resource_url, "resource_hash": resource_hash, "query": self._preview_text(query), "query_length": len(query) if query else 0},
         )
-        url = f"https://hdhive.com/go-api/customer/resources/{resource_hash}/url?query={quote(query, safe='')}"
+        base_origin = self._get_base_origin(resource_url)
+        url = f"{base_origin}/go-api/customer/resources/{resource_hash}/url?query={quote(query, safe='')}"
         for _ in range(2):
             headers = self._build_api_headers()
             response = await self._send(
@@ -896,7 +1095,8 @@ class HDHiveResolver:
             "input",
             {"resource_url": resource_url, "resource_hash": resource_hash, "query": self._preview_text(query), "query_length": len(query) if query else 0},
         )
-        url = f"https://hdhive.com/go-api/customer/resources/{resource_hash}/unlock"
+        base_origin = self._get_base_origin(resource_url)
+        url = f"{base_origin}/go-api/customer/resources/{resource_hash}/unlock"
         payload = {"data": query}
         for _ in range(2):
             headers = self._build_api_json_headers()
@@ -1130,7 +1330,7 @@ class HDHiveResolver:
             if isinstance(domain, str) and domain.strip()
         ]
 
-        if "hdhive.com" not in text and "hdhive.online" not in text:
+        if "hdhive." not in text.lower():
             self._log_step("rewrite_text", "output", {"status": "skip_no_domain"})
             if ignore_domains:
                 replaced, ignored_count = self._remove_ignored_links(text, ignore_domains)
@@ -1142,7 +1342,7 @@ class HDHiveResolver:
                     )
                 return replaced
             return text
-        
+
         matches = list(self._resource_pattern.finditer(text))
         if not matches:
             matches = list(self._hdhive_url_pattern.finditer(text))

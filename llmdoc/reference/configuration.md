@@ -102,9 +102,9 @@ hdhive:
   unlock_threshold: 20
   user_agent: "..."
   cookie_file_path: "/app/config/hdhive.json"
-  server_action_login: "605db6f9f9097005c3efa316327b49963e8872c8c6"
-  server_action_encrypt: "40f37785abc6ff4ada97734df369877f373d8b1002"
-  server_action_decrypt: "40a9013be8da6c1b4846eb2bbca43f1339a4fb4f4b"
+  server_action_login: "60117d32a5f428137a3759c2470ea04fd5bc035e45"
+  server_action_encrypt: "4009ae744a7d94ccc9b0f0ff4e3f5bc55d39a111ad"
+  server_action_decrypt: "40c9c3d9fd41a3ddb01539b93b112ebf0dd6e5f98f"
   next_action_first: ""      # legacy fallback
   next_action_second: ""     # legacy fallback
   next_action_unlock: ""     # legacy fallback
@@ -114,3 +114,4 @@ hdhive:
 - Cookie is persisted to `cookie_file_path` and merged from all `Set-Cookie` responses, so next run can reuse session.
 - Unlock check is threshold-based: when required points are greater than or equal to `unlock_threshold`, resolver stops instead of spending credits.
 - `server_action_*` drives the current HDHive workflow; `next_action_*` / `login_next_action` are kept for compatibility fallback paths.
+- If configured `server_action_*` becomes stale after site deploy, resolver can auto-discover latest IDs from current page chunk scripts at runtime.
